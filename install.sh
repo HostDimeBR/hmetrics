@@ -2,15 +2,18 @@
 # netdata-secure-install.sh
 # Instala ou reinstala o Netdata via kickstart e aplica configuração corporativa segura
 # Uso:
-#   sudo ./netdata-secure-install.sh --claim-token TOKEN --claim-rooms ROOM --claim-url URL
+#   ./netdata-secure-install.sh --claim-token TOKEN --claim-rooms ROOM --claim-url URL
 
 set -euo pipefail
 
 # --- Verificação de privilégios ---
 if [ "$(id -u)" -ne 0 ]; then
-  echo -e "[\033[1;31m×\033[0m] Este script precisa ser executado como root."
-  echo "Use: sudo $0 [argumentos]"
-  exit 1
+  echo -e "\n[\033[1;33m!\033[0m] Privilégios de administrador são necessários para executar este script."
+  echo -e "[\033[1;34m→\033[0m] Tentando reexecutar automaticamente com sudo..."
+  echo
+
+  # Reexecuta com sudo, repassando todos os argumentos originais
+  exec sudo bash "$0" "$@"
 fi
 
 # --- Funções auxiliares ---
@@ -19,20 +22,14 @@ warn() { echo -e "[\033[1;33m!\033[0m] $*" >&2; }
 err()  { echo -e "[\033[1;31m×\033[0m] $*" >&2; exit 1; }
 
 # --- Dependências mínimas ---
-for bin in grep sed; do
+for bin in wget grep sed; do
   command -v "$bin" >/dev/null 2>&1 || err "Dependência ausente: $bin"
 done
 
-# --- Download helper (wget ou curl) ---
+# --- Download helper ---
 download_file() {
   local url="$1" dest="$2"
-  if command -v wget >/dev/null 2>&1; then
-    wget -q -O "$dest" "$url" || err "Falha no download com wget ($url)"
-  elif command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$dest" || err "Falha no download com curl ($url)"
-  else
-    err "Nem wget nem curl disponíveis. Instale um deles e tente novamente."
-  fi
+  wget -q -O "$dest" "$url" || err "Falha no download com wget ($url)"
 }
 
 # --- Parâmetros ---
