@@ -11,8 +11,6 @@ if [ "$(id -u)" -ne 0 ]; then
   echo -e "\n[\033[1;33m!\033[0m] Privilégios de administrador são necessários para executar este script."
   echo -e "[\033[1;34m→\033[0m] Tentando reexecutar automaticamente com sudo..."
   echo
-
-  # Reexecuta com sudo, repassando todos os argumentos originais
   exec sudo bash "$0" "$@"
 fi
 
@@ -22,15 +20,16 @@ warn() { echo -e "[\033[1;33m!\033[0m] $*" >&2; }
 err()  { echo -e "[\033[1;31m×\033[0m] $*" >&2; exit 1; }
 
 # --- Dependências mínimas ---
-for bin in wget grep sed; do
+for bin in wget grep sed mountpoint; do
   command -v "$bin" >/dev/null 2>&1 || err "Dependência ausente: $bin"
 done
 
-# --- Download helper ---
-download_file() {
-  local url="$1" dest="$2"
-  wget -q -O "$dest" "$url" || err "Falha no download com wget ($url)"
-}
+# --- Detectar se /tmp está com noexec ---
+TMP_DIR="/tmp"
+if mount | grep -E '\s/tmp\s' | grep -q 'noexec'; then
+  warn "/tmp está montado com noexec — usando /root para arquivos temporários."
+  TMP_DIR="/root"
+fi
 
 # --- Parâmetros ---
 KICKSTART_URL="https://get.netdata.cloud/kickstart.sh"
@@ -43,13 +42,21 @@ if [ ${#PASS_ARGS[@]} -eq 0 ]; then
   echo "  sudo ./netdata-secure-install.sh --claim-token TOKEN --claim-rooms ROOM --claim-url URL"
 fi
 
+# --- Download helper ---
+download_file() {
+  local url="$1" dest="$2"
+  wget -q -O "$dest" "$url" || err "Falha no download com wget ($url)"
+}
+
 # --- Instalação silenciosa (sempre reinstala) ---
 log "Baixando e executando instalador Netdata (modo silencioso)..."
-download_file "$KICKSTART_URL" /tmp/netdata-kickstart.sh
-chmod +x /tmp/netdata-kickstart.sh
+KICKSTART_FILE="$TMP_DIR/netdata-kickstart.sh"
+LOGFILE="$TMP_DIR/netdata-install.log"
 
-LOGFILE="/tmp/netdata-install.log"
-/tmp/netdata-kickstart.sh $INSTALL_FLAGS "${PASS_ARGS[@]}" > "$LOGFILE" 2>&1 || {
+download_file "$KICKSTART_URL" "$KICKSTART_FILE"
+chmod +x "$KICKSTART_FILE"
+
+"$KICKSTART_FILE" $INSTALL_FLAGS "${PASS_ARGS[@]}" > "$LOGFILE" 2>&1 || {
   err "Falha durante a instalação. Verifique o log em $LOGFILE"
 }
 
@@ -101,7 +108,6 @@ cat <<'EOF' >> "$CONFIG_PATH"
 
     # Tier 0: per-second data for 30 days
     dbengine tier 0 retention time = 30d
-    # No size limit - let time control retention
 
     # Tier 1: per-minute data for 6 months
     dbengine tier 1 update every iterations = 60
