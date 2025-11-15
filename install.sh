@@ -3,6 +3,8 @@
 # Instala ou reinstala o Netdata via kickstart e aplica configuração corporativa segura
 # Uso:
 #   ./netdata-secure-install.sh --claim-token TOKEN --claim-rooms ROOM --claim-url URL
+#   ./netdata-secure-install.sh --uninstall
+#   ./netdata-secure-install.sh --nightly-channel --claim-token ... (para canal nightly)
 
 set -euo pipefail
 
@@ -20,7 +22,7 @@ warn() { echo -e "[\033[1;33m!\033[0m] $*" >&2; }
 err()  { echo -e "[\033[1;31m×\033[0m] $*" >&2; exit 1; }
 
 # --- Dependências mínimas ---
-for bin in wget grep sed mountpoint; do
+for bin in wget grep sed; do
   command -v "$bin" >/dev/null 2>&1 || err "Dependência ausente: $bin"
 done
 
@@ -31,10 +33,15 @@ if mount | grep -E '\s/tmp\s' | grep -q 'noexec'; then
   TMP_DIR="/root"
 fi
 
-# --- Detectar e instalar libuv se necessário ---
+# --- Helper para libuv (usado só em instalação) ---
 check_libuv() {
-  if ldconfig -p 2>/dev/null | grep -q 'libuv\.so\.1'; then
-    log "Biblioteca libuv.so.1 encontrada."
+  if command -v ldconfig >/dev/null 2>&1; then
+    if ldconfig -p 2>/dev/null | grep -q 'libuv\.so\.1'; then
+      log "Biblioteca libuv.so.1 encontrada."
+      return 0
+    fi
+  else
+    warn "ldconfig não encontrado; pulando checagem de libuv."
     return 0
   fi
 
@@ -53,8 +60,7 @@ check_libuv() {
   if [ -n "$PKG_MANAGER" ]; then
     case "$PKG_MANAGER" in
       dnf|yum)
-        # Habilita repositórios necessários no Alma/RHEL
-        if grep -qiE "AlmaLinux|Rocky|Red Hat|CentOS" /etc/os-release 2>/dev/null; then
+        if [ -f /etc/os-release ] && grep -qiE "AlmaLinux|Rocky|Red Hat|CentOS" /etc/os-release 2>/dev/null; then
           $PKG_MANAGER install -y epel-release || true
           $PKG_MANAGER config-manager --set-enabled powertools 2>/dev/null || \
           $PKG_MANAGER config-manager --set-enabled crb 2>/dev/null || true
@@ -62,7 +68,7 @@ check_libuv() {
         $PKG_MANAGER install -y libuv || true
         ;;
       apt-get)
-        apt-get update -qq
+        apt-get update -qq || true
         apt-get install -y libuv1 || true
         ;;
       zypper)
@@ -74,32 +80,58 @@ check_libuv() {
   fi
 
   # Se ainda não existir, tenta link simbólico de fallback
-  if ! ldconfig -p 2>/dev/null | grep -q 'libuv\.so\.1'; then
-    if [ -f /usr/lib64/libuv.so.0 ]; then
-      ln -sf /usr/lib64/libuv.so.0 /usr/lib64/libuv.so.1
-      ldconfig
-      log "Symlink criado: /usr/lib64/libuv.so.1 → libuv.so.0 (modo compatibilidade)"
-    elif [ -f /usr/lib/x86_64-linux-gnu/libuv.so.0 ]; then
-      ln -sf /usr/lib/x86_64-linux-gnu/libuv.so.0 /usr/lib/x86_64-linux-gnu/libuv.so.1
-      ldconfig
-      log "Symlink criado: /usr/lib/x86_64-linux-gnu/libuv.so.1 → libuv.so.0 (modo compatibilidade)"
-    else
-      warn "libuv ainda não encontrada após tentativa de instalação."
+  if command -v ldconfig >/dev/null 2>&1; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libuv\.so\.1'; then
+      if [ -f /usr/lib64/libuv.so.0 ]; then
+        ln -sf /usr/lib64/libuv.so.0 /usr/lib64/libuv.so.1
+        ldconfig
+        log "Symlink criado: /usr/lib64/libuv.so.1 → libuv.so.0 (modo compatibilidade)"
+      elif [ -f /usr/lib/x86_64-linux-gnu/libuv.so.0 ]; then
+        ln -sf /usr/lib/x86_64-linux-gnu/libuv.so.0 /usr/lib/x86_64-linux-gnu/libuv.so.1
+        ldconfig
+        log "Symlink criado: /usr/lib/x86_64-linux-gnu/libuv.so.1 → libuv.so.0 (modo compatibilidade)"
+      else
+        warn "libuv ainda não encontrada após tentativa de instalação."
+      fi
     fi
   fi
 }
 
-check_libuv
+# --- Parse de argumentos: uninstall / canal / claim ---
+UNINSTALL_MODE="false"
+CHANNEL_FLAG="--stable-channel"   # default
+CLAIM_ARGS=()
 
-# --- Parâmetros ---
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall)
+      UNINSTALL_MODE="true"
+      ;;
+    --nightly-channel)
+      CHANNEL_FLAG="--nightly-channel"
+      ;;
+    --stable-channel)
+      CHANNEL_FLAG="--stable-channel"
+      ;;
+    *)
+      CLAIM_ARGS+=("$arg")
+      ;;
+  esac
+done
+
+# --- Parâmetros do kickstart ---
 KICKSTART_URL="https://get.netdata.cloud/kickstart.sh"
-INSTALL_FLAGS="--non-interactive --stable-channel"
-PASS_ARGS=("$@")
 
-if [ ${#PASS_ARGS[@]} -eq 0 ]; then
+# Aviso se for instalação sem claims (pra você lembrar, mas não quebra)
+if [ "$UNINSTALL_MODE" = "false" ] && [ ${#CLAIM_ARGS[@]} -eq 0 ]; then
   warn "Nenhum argumento de claim informado."
   echo "Exemplo:"
   echo "  sudo ./netdata-secure-install.sh --claim-token TOKEN --claim-rooms ROOM --claim-url URL"
+fi
+
+# Em modo instalação, garante libuv antes de tentar subir Netdata
+if [ "$UNINSTALL_MODE" = "false" ]; then
+  check_libuv
 fi
 
 # --- Download helper ---
@@ -108,7 +140,7 @@ download_file() {
   wget -q -O "$dest" "$url" || err "Falha no download com wget ($url)"
 }
 
-# --- Instalação silenciosa (sempre reinstala) ---
+# --- Baixar kickstart ---
 log "Baixando e executando instalador Netdata (modo silencioso)..."
 KICKSTART_FILE="$TMP_DIR/netdata-kickstart.sh"
 LOGFILE="$TMP_DIR/netdata-install.log"
@@ -116,7 +148,17 @@ LOGFILE="$TMP_DIR/netdata-install.log"
 download_file "$KICKSTART_URL" "$KICKSTART_FILE"
 chmod +x "$KICKSTART_FILE"
 
-"$KICKSTART_FILE" $INSTALL_FLAGS "${PASS_ARGS[@]}" > "$LOGFILE" 2>&1 || {
+# --- Modo UNINSTALL ---
+if [ "$UNINSTALL_MODE" = "true" ]; then
+  "$KICKSTART_FILE" --uninstall > "$LOGFILE" 2>&1 || {
+    err "Falha durante a desinstalação. Verifique o log em $LOGFILE"
+  }
+  log "Desinstalação concluída (detalhes em $LOGFILE)."
+  exit 0
+fi
+
+# --- Modo INSTALL ---
+"$KICKSTART_FILE" --non-interactive "$CHANNEL_FLAG" "${CLAIM_ARGS[@]}" > "$LOGFILE" 2>&1 || {
   err "Falha durante a instalação. Verifique o log em $LOGFILE"
 }
 
