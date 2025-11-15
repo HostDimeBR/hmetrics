@@ -31,6 +31,66 @@ if mount | grep -E '\s/tmp\s' | grep -q 'noexec'; then
   TMP_DIR="/root"
 fi
 
+# --- Detectar e instalar libuv se necessário ---
+check_libuv() {
+  if ldconfig -p 2>/dev/null | grep -q 'libuv\.so\.1'; then
+    log "Biblioteca libuv.so.1 encontrada."
+    return 0
+  fi
+
+  warn "Biblioteca libuv.so.1 não encontrada. Tentando instalar libuv..."
+  local PKG_MANAGER=""
+  if command -v dnf >/dev/null 2>&1; then
+    PKG_MANAGER="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    PKG_MANAGER="yum"
+  elif command -v apt-get >/dev/null 2>&1; then
+    PKG_MANAGER="apt-get"
+  elif command -v zypper >/dev/null 2>&1; then
+    PKG_MANAGER="zypper"
+  fi
+
+  if [ -n "$PKG_MANAGER" ]; then
+    case "$PKG_MANAGER" in
+      dnf|yum)
+        # Habilita repositórios necessários no Alma/RHEL
+        if grep -qiE "AlmaLinux|Rocky|Red Hat|CentOS" /etc/os-release 2>/dev/null; then
+          $PKG_MANAGER install -y epel-release || true
+          $PKG_MANAGER config-manager --set-enabled powertools 2>/dev/null || \
+          $PKG_MANAGER config-manager --set-enabled crb 2>/dev/null || true
+        fi
+        $PKG_MANAGER install -y libuv || true
+        ;;
+      apt-get)
+        apt-get update -qq
+        apt-get install -y libuv1 || true
+        ;;
+      zypper)
+        zypper --non-interactive install libuv1 || true
+        ;;
+    esac
+  else
+    warn "Nenhum gerenciador de pacotes detectado — não foi possível instalar automaticamente o libuv."
+  fi
+
+  # Se ainda não existir, tenta link simbólico de fallback
+  if ! ldconfig -p 2>/dev/null | grep -q 'libuv\.so\.1'; then
+    if [ -f /usr/lib64/libuv.so.0 ]; then
+      ln -sf /usr/lib64/libuv.so.0 /usr/lib64/libuv.so.1
+      ldconfig
+      log "Symlink criado: /usr/lib64/libuv.so.1 → libuv.so.0 (modo compatibilidade)"
+    elif [ -f /usr/lib/x86_64-linux-gnu/libuv.so.0 ]; then
+      ln -sf /usr/lib/x86_64-linux-gnu/libuv.so.0 /usr/lib/x86_64-linux-gnu/libuv.so.1
+      ldconfig
+      log "Symlink criado: /usr/lib/x86_64-linux-gnu/libuv.so.1 → libuv.so.0 (modo compatibilidade)"
+    else
+      warn "libuv ainda não encontrada após tentativa de instalação."
+    fi
+  fi
+}
+
+check_libuv
+
 # --- Parâmetros ---
 KICKSTART_URL="https://get.netdata.cloud/kickstart.sh"
 INSTALL_FLAGS="--non-interactive --stable-channel"
